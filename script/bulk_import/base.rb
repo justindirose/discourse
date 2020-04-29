@@ -1,4 +1,3 @@
-# frozen_string_literal: true
 
 if ARGV.include?('bbcode-to-md')
   # Replace (most) bbcode with markdown before creating posts.
@@ -76,7 +75,7 @@ class BulkImport::Base
     charset = ENV["DB_CHARSET"] || "utf8"
     db = ActiveRecord::Base.connection_config
     @encoder = PG::TextEncoder::CopyRow.new
-    @raw_connection = PG.connect(dbname: db[:database], host: db[:host_names]&.first, port: db[:port])
+    @raw_connection = PG.connect(dbname: db[:database], host: "localhost", port: db[:port], password: "0f35ay01A99YGXL15OszZF")
     @uploader = ImportScripts::Uploader.new
     @html_entities = HTMLEntities.new
     @encoding = CHARSET_MAP[charset]
@@ -198,6 +197,7 @@ class BulkImport::Base
     @last_user_id = last_id(User)
     @last_user_email_id = last_id(UserEmail)
     @emails = User.unscoped.joins(:user_emails).pluck(:"user_emails.email").to_set
+    @user_emails = UserEmail.unscoped.pluck(:email)
     @usernames_lower = User.unscoped.pluck(:username_lower).to_set
     @mapped_usernames = UserCustomField.joins(:user).where(name: "import_username").pluck("user_custom_fields.value", "users.username").to_h
 
@@ -435,6 +435,10 @@ class BulkImport::Base
     user_email[:updated_at] ||= user_email[:created_at]
     user_email[:email] ||= random_email
     user_email[:email].downcase!
+    if @user_emails.include?(user_email[:email])
+      user_email[:email] = random_email
+    end
+    @user_emails.push(user_email[:email])
 
     user_email
   end
@@ -517,6 +521,9 @@ class BulkImport::Base
     end
     post[:like_count] ||= 0
     post[:cooked] = pre_cook post[:raw]
+    post[:cooked].gsub!("\n","")
+    post[:cooked].gsub!("\0","")
+    post[:raw].gsub!("\0","")
     post[:hidden] ||= false
     post[:word_count] = post[:raw].scan(/[[:word:]]+/).size
     post[:created_at] ||= NOW
@@ -547,6 +554,8 @@ class BulkImport::Base
   end
 
   def process_raw(raw)
+    raw.gsub!("\r\n","\n")
+    raw.gsub!("\n\n\n","\n")
     # fix whitespaces
     raw.gsub!(/(\\r)?\\n/, "\n")
     raw.gsub!("\\t", "\t")
@@ -686,12 +695,14 @@ class BulkImport::Base
     imported_ids = []
     process_method_name = "process_#{name}"
     sql = "COPY #{name.pluralize} (#{columns.map { |c| "\"#{c}\"" }.join(",")}) FROM STDIN"
+    things = []
 
     @raw_connection.copy_data(sql, @encoder) do
       rows.each do |row|
         begin
           next unless mapped = yield(row)
           processed = send(process_method_name, mapped)
+          things = processed
           imported_ids << mapped[:imported_id] unless mapped[:imported_id].nil?
           imported_ids |= mapped[:imported_ids] unless mapped[:imported_ids].nil?
           @raw_connection.put_copy_data columns.map { |c| processed[c] }
@@ -718,6 +729,7 @@ class BulkImport::Base
       }
     end
   rescue => e
+    puts things
     puts e.message
     puts e.backtrace.join("\n")
   end
@@ -742,7 +754,7 @@ class BulkImport::Base
   end
 
   def fix_name(name)
-    name.scrub! if name.valid_encoding? == false
+    name.scrub! if name && name.valid_encoding? == false
     return if name.blank?
     name = ActiveSupport::Inflector.transliterate(name)
     name.gsub!(/[^\w.-]+/, "_")

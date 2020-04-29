@@ -1,4 +1,3 @@
-# frozen_string_literal: true
 
 require_relative "base"
 require "set"
@@ -7,7 +6,7 @@ require "htmlentities"
 
 class BulkImport::VBulletin < BulkImport::Base
 
-  TABLE_PREFIX = "vb_"
+  TABLE_PREFIX = ""
   SUSPENDED_TILL ||= Date.new(3000, 1, 1)
   ATTACHMENT_DIR ||= ENV['ATTACHMENT_DIR'] || '/shared/import/data/attachments'
   AVATAR_DIR ||= ENV['AVATAR_DIR'] || '/shared/import/data/customavatars'
@@ -17,7 +16,7 @@ class BulkImport::VBulletin < BulkImport::Base
 
     host     = ENV["DB_HOST"] || "localhost"
     username = ENV["DB_USERNAME"] || "root"
-    password = ENV["DB_PASSWORD"]
+    password = ENV["DB_PASSWORD"] || ""
     database = ENV["DB_NAME"] || "vbulletin"
     charset  = ENV["DB_CHARSET"] || "utf8"
 
@@ -30,7 +29,8 @@ class BulkImport::VBulletin < BulkImport::Base
       password: password,
       database: database,
       encoding: charset,
-      reconnect: true
+      reconnect: true,
+      read_timeout: 10000000, write_timeout: 10000000, connect_timeout: 10000000 
     )
 
     @client.query_options.merge!(as: :array, cache_rows: false)
@@ -47,13 +47,13 @@ class BulkImport::VBulletin < BulkImport::Base
 
   def execute
     # enable as per requirement:
-    # SiteSetting.automatic_backups_enabled = false
-    # SiteSetting.disable_emails = "non-staff"
-    # SiteSetting.authorized_extensions = '*'
-    # SiteSetting.max_image_size_kb = 102400
-    # SiteSetting.max_attachment_size_kb = 102400
-    # SiteSetting.clean_up_uploads = false
-    # SiteSetting.clean_orphan_uploads_grace_period_hours = 43200
+    SiteSetting.automatic_backups_enabled = false
+    SiteSetting.disable_emails = "non-staff"
+    SiteSetting.authorized_extensions = '*'
+    SiteSetting.max_image_size_kb = 102400
+    SiteSetting.max_attachment_size_kb = 102400
+    SiteSetting.clean_up_uploads = false
+    SiteSetting.clean_orphan_uploads_grace_period_hours = 43200
 
     import_groups
     import_users
@@ -79,7 +79,7 @@ class BulkImport::VBulletin < BulkImport::Base
     create_permalink_file
     import_attachments
     import_avatars
-    import_signatures
+    #import_signatures
   end
 
   def import_groups
@@ -271,14 +271,19 @@ class BulkImport::VBulletin < BulkImport::Base
     return if categories.empty?
 
     parent_categories   = categories.select { |c| c[1] == -1 }
-    children_categories = categories.select { |c| c[1] != -1 }
+    children_categories = categories.select { |c| c[1] != -1 && c[1] != 0 }
 
     parent_category_ids = Set.new parent_categories.map { |c| c[0] }
 
     # cut down the tree to only 2 levels of categories
     children_categories.each do |cc|
       until parent_category_ids.include?(cc[1])
+        begin
         cc[1] = categories.find { |c| c[0] == cc[1] }[1]
+        rescue
+          puts '', cc
+          exit
+        end
       end
     end
 
@@ -344,12 +349,13 @@ class BulkImport::VBulletin < BulkImport::Base
 
           FROM #{TABLE_PREFIX}post p
           JOIN #{TABLE_PREFIX}thread t ON t.threadid = p.threadid
-         WHERE postid > #{@last_imported_post_id}
+          WHERE postid > #{@last_imported_post_id}
       ORDER BY postid
     SQL
 
     create_posts(posts) do |row|
-      topic_id = topic_id_from_imported_id(row[1])
+      next unless topic_id = topic_id_from_imported_id(row[1])
+      next if row[6].blank? || row[6] == '0'
       replied_post_topic_id = topic_id_from_imported_post_id(row[2])
       reply_to_post_number = topic_id == replied_post_topic_id ? post_number_from_imported_id(row[2]) : nil
 
@@ -360,7 +366,7 @@ class BulkImport::VBulletin < BulkImport::Base
         user_id: user_id_from_imported_id(row[3]),
         created_at: Time.zone.at(row[4]),
         hidden: row[5] == 0,
-        raw: normalize_text(row[6]),
+        raw: normalize_text(row[6])
       }
 
       post[:like_count] = row[7] if @has_post_thanks
@@ -487,7 +493,12 @@ class BulkImport::VBulletin < BulkImport::Base
     id_mapping = []
 
     Topic.listable_topics.find_each do |topic|
+      begin
       pcf = topic.first_post.custom_fields
+      rescue
+        puts topic.id
+        exit
+      end
       if pcf && pcf["import_id"]
         id = pcf["import_id"].split('-').last
         id_mapping.push("XXX#{id}  YYY#{topic.id}")
