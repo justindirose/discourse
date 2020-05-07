@@ -9,7 +9,7 @@ class BulkImport::VBulletin < BulkImport::Base
   TABLE_PREFIX = ""
   SUSPENDED_TILL ||= Date.new(3000, 1, 1)
   ATTACHMENT_DIR ||= ENV['ATTACHMENT_DIR'] || '/shared/import/data/attachments'
-  AVATAR_DIR ||= ENV['AVATAR_DIR'] || '/shared/import/data/customavatars'
+  AVATAR_DIR ||= ENV['AVATAR_DIR'] || '/shared/import/data/avatars'
 
   def initialize
     super
@@ -106,7 +106,7 @@ class BulkImport::VBulletin < BulkImport::Base
     puts "Importing users..."
 
     users = mysql_stream <<-SQL
-        SELECT u.userid, username, email, joindate, birthday, ipaddress, u.usergroupid, bandate, liftdate
+        SELECT u.userid, username, email, joindate, birthday, ipaddress, u.usergroupid, bandate, liftdate, usertitle
           FROM #{TABLE_PREFIX}user u
      LEFT JOIN #{TABLE_PREFIX}userban ub ON ub.userid = u.userid
          WHERE u.userid > #{@last_imported_user_id}
@@ -121,6 +121,7 @@ class BulkImport::VBulletin < BulkImport::Base
         created_at: Time.zone.at(row[3]),
         date_of_birth: parse_birthday(row[4]),
         primary_group_id: group_id_from_imported_id(row[6]),
+        title: normalize_text(row[9])
       }
       u[:ip_address] = row[5][/\b(?:\d{1,3}\.){3}\d{1,3}\b/] if row[5].present?
       if row[7]
@@ -622,8 +623,7 @@ class BulkImport::VBulletin < BulkImport::Base
         print "\r%7d - %6d/sec" % [count, count.to_f / (Time.now - start)]
 
         next if item == ('.') || item == ('..') || item == ('.DS_Store')
-        next unless item =~ /avatar(\d+)_(\d).gif/
-        scan = item.scan(/avatar(\d+)_(\d).gif/)
+        scan = item.scan(/(\d+)-.+\./)
         next unless scan[0][0].present?
         u = UserCustomField.find_by(name: "import_id", value: scan[0][0]).try(:user)
         next unless u.present?
