@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 
 require_relative "base"
 require "set"
@@ -30,7 +31,7 @@ class BulkImport::VBulletin < BulkImport::Base
       database: database,
       encoding: charset,
       reconnect: true,
-      read_timeout: 10000000, write_timeout: 10000000, connect_timeout: 10000000 
+      read_timeout: 10000000, write_timeout: 10000000, connect_timeout: 10000000
     )
 
     @client.query_options.merge!(as: :array, cache_rows: false)
@@ -76,7 +77,8 @@ class BulkImport::VBulletin < BulkImport::Base
     import_topic_allowed_users
     import_private_posts
 
-    create_permalink_file
+    create_permalinks
+    #create_permalink_file
     import_attachments
     import_avatars
     #import_signatures
@@ -106,7 +108,7 @@ class BulkImport::VBulletin < BulkImport::Base
     puts "Importing users..."
 
     users = mysql_stream <<-SQL
-        SELECT u.userid, username, email, joindate, birthday, ipaddress, u.usergroupid, bandate, liftdate, usertitle
+        SELECT u.userid, username, email, joindate, birthday, ipaddress, u.usergroupid, bandate, liftdate, u.usertitle
           FROM #{TABLE_PREFIX}user u
      LEFT JOIN #{TABLE_PREFIX}userban ub ON ub.userid = u.userid
          WHERE u.userid > #{@last_imported_user_id}
@@ -280,7 +282,7 @@ class BulkImport::VBulletin < BulkImport::Base
     children_categories.each do |cc|
       until parent_category_ids.include?(cc[1])
         begin
-        cc[1] = categories.find { |c| c[0] == cc[1] }[1]
+          cc[1] = categories.find { |c| c[0] == cc[1] }[1]
         rescue
           puts '', cc
           exit
@@ -488,6 +490,63 @@ class BulkImport::VBulletin < BulkImport::Base
     end
   end
 
+  def create_permalinks
+    puts '', 'Creating permalinks...', ''
+
+    puts '    User pages...'
+
+    start = Time.now
+    count = 0
+    now = Time.zone.now
+
+    sql = "COPY permalinks (url, created_at, updated_at, external_url) FROM STDIN"
+
+    @raw_connection.copy_data(sql, @encoder) do
+      User.includes(:_custom_fields).find_each do |u|
+        count += 1
+        ucf = u.custom_fields
+        if ucf && ucf["import_id"]
+          @raw_connection.put_copy_data(
+            ["sdmb/member.php?u=#{ucf["import_id"]}", now, now, "/users/#{u.username}"]
+          )
+        end
+
+        print "\r%7d - %6d/sec" % [count, count.to_f / (Time.now - start)] if count % 5000 == 0
+      end
+    end
+
+    puts '', '', '    Topics and posts...'
+
+    start = Time.now
+    count = 0
+
+    sql = "COPY permalinks (url, topic_id, post_id, created_at, updated_at) FROM STDIN"
+
+    @raw_connection.copy_data(sql, @encoder) do
+      Post.includes(:_custom_fields).find_each do |post|
+        count += 1
+        pcf = post.custom_fields
+        if pcf && pcf["import_id"]
+          topic = post.topic
+          if topic.present?
+            tcf = topic.custom_fields
+            if post.post_number == 1
+              @raw_connection.put_copy_data(
+                ["sdmb/showthread.php?t=#{tcf["import_id"]}", topic.id, nil, now, now]
+              )
+            else
+              @raw_connection.put_copy_data(
+                ["sdmb/showpost.php?p=#{pcf["import_id"]}", nil, post.id, now, now]
+              )
+            end
+          end
+        end
+
+        print "\r%7d - %6d/sec" % [count, count.to_f / (Time.now - start)] if count % 5000 == 0
+      end
+    end
+  end
+
   def create_permalink_file
     puts '', 'Creating Permalink File...', ''
 
@@ -495,7 +554,7 @@ class BulkImport::VBulletin < BulkImport::Base
 
     Topic.listable_topics.find_each do |topic|
       begin
-      pcf = topic.first_post.custom_fields
+        pcf = topic.first_post.custom_fields
       rescue
         puts topic.id
         exit
